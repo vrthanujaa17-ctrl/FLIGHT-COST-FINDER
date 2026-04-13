@@ -1,166 +1,383 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from dotenv import load_dotenv
+import os
+import time
+import requests
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-flights = [
+SKYSCANNER_API_KEY = os.getenv("SKYSCANNER_API_KEY", "").strip()
+SKYSCANNER_API_HOST = os.getenv("SKYSCANNER_API_HOST", "flights-sky.p.rapidapi.com").strip()
+
+MOCK_FLIGHTS = [
     {
-        "id": 1,
-        "from_city": "Detroit",
-        "to_city": "New York",
+        "airline": "United",
+        "origin": "EWR",
+        "destination": "LAX",
+        "departureTime": "2026-06-15T07:00:00",
+        "arrivalTime": "2026-06-15T09:56:00",
+        "price": "USD 164.52",
+        "currency": "USD",
+        "durationMinutes": 356,
+        "stopCount": 0,
+        "layoverMinutes": 0,
+    },
+    {
         "airline": "Delta",
-        "price": 220,
-        "stops": 1,
-        "layover": 2,
-        "departure_time": "08:00 AM",
-        "arrival_time": "12:30 PM",
-        "duration": "4h 30m",
-        "duration_minutes": 270,
-        "date": "2026-04-20",
-        "ticket_class": "Economy"
+        "origin": "JFK",
+        "destination": "LAX",
+        "departureTime": "2026-06-15T08:00:00",
+        "arrivalTime": "2026-06-15T11:15:00",
+        "price": "USD 220.00",
+        "currency": "USD",
+        "durationMinutes": 315,
+        "stopCount": 0,
+        "layoverMinutes": 0,
     },
     {
-        "id": 2,
-        "from_city": "Detroit",
-        "to_city": "New York",
-        "airline": "Spirit",
-        "price": 150,
-        "stops": 2,
-        "layover": 4,
-        "departure_time": "10:00 AM",
-        "arrival_time": "05:00 PM",
-        "duration": "7h 00m",
-        "duration_minutes": 420,
-        "date": "2026-04-20",
-        "ticket_class": "Economy"
-    },
-    {
-        "id": 3,
-        "from_city": "Detroit",
-        "to_city": "Boston",
-        "airline": "JetBlue",
-        "price": 210,
-        "stops": 1,
-        "layover": 2,
-        "departure_time": "09:30 AM",
-        "arrival_time": "01:45 PM",
-        "duration": "4h 15m",
-        "duration_minutes": 255,
-        "date": "2026-04-20",
-        "ticket_class": "Economy"
-    },
-    {
-        "id": 4,
-        "from_city": "Chicago",
-        "to_city": "Los Angeles",
-        "airline": "United",
-        "price": 320,
-        "stops": 0,
-        "layover": 0,
-        "departure_time": "07:00 AM",
-        "arrival_time": "09:30 AM",
-        "duration": "4h 30m",
-        "duration_minutes": 270,
-        "date": "2026-04-21",
-        "ticket_class": "Business"
-    },
-    {
-        "id": 5,
-        "from_city": "New York",
-        "to_city": "Miami",
         "airline": "American Airlines",
-        "price": 280,
-        "stops": 1,
-        "layover": 1,
-        "departure_time": "01:00 PM",
-        "arrival_time": "06:00 PM",
-        "duration": "5h 00m",
-        "duration_minutes": 300,
-        "date": "2026-04-21",
-        "ticket_class": "Economy"
+        "origin": "JFK",
+        "destination": "LAX",
+        "departureTime": "2026-06-15T09:30:00",
+        "arrivalTime": "2026-06-15T14:15:00",
+        "price": "USD 245.75",
+        "currency": "USD",
+        "durationMinutes": 345,
+        "stopCount": 1,
+        "layoverMinutes": 55,
     },
-    {
-        "id": 6,
-        "from_city": "Boston",
-        "to_city": "Seattle",
-        "airline": "Alaska Airlines",
-        "price": 390,
-        "stops": 1,
-        "layover": 3,
-        "departure_time": "06:30 AM",
-        "arrival_time": "12:30 PM",
-        "duration": "8h 00m",
-        "duration_minutes": 480,
-        "date": "2026-04-22",
-        "ticket_class": "Economy"
-    },
-    {
-        "id": 7,
-        "from_city": "Detroit",
-        "to_city": "New York",
-        "airline": "United",
-        "price": 260,
-        "stops": 0,
-        "layover": 0,
-        "departure_time": "03:00 PM",
-        "arrival_time": "05:00 PM",
-        "duration": "2h 00m",
-        "duration_minutes": 120,
-        "date": "2026-04-20",
-        "ticket_class": "Business"
-    },
-    {
-        "id": 8,
-        "from_city": "Dallas",
-        "to_city": "San Francisco",
-        "airline": "Southwest",
-        "price": 300,
-        "stops": 1,
-        "layover": 2,
-        "departure_time": "11:00 AM",
-        "arrival_time": "03:30 PM",
-        "duration": "6h 30m",
-        "duration_minutes": 390,
-        "date": "2026-04-23",
-        "ticket_class": "Economy"
-    }
 ]
 
-@app.route("/")
+
+def safe_get(data, *keys, default=None):
+    current = data
+    for key in keys:
+        try:
+            if isinstance(current, dict):
+                current = current.get(key)
+            elif isinstance(current, list) and isinstance(key, int):
+                current = current[key]
+            else:
+                return default
+        except Exception:
+            return default
+
+        if current is None:
+            return default
+    return current
+
+
+def normalize_airport_code(value):
+    if isinstance(value, dict):
+        return (
+            value.get("displayCode")
+            or value.get("skyId")
+            or value.get("id")
+            or value.get("name")
+            or "N/A"
+        )
+    return str(value) if value else "N/A"
+
+
+def parse_itinerary(item):
+    if not isinstance(item, dict):
+        return None
+
+    leg = None
+    legs = item.get("legs", [])
+    if isinstance(legs, list) and legs:
+        leg = legs[0]
+    elif isinstance(item.get("leg"), dict):
+        leg = item.get("leg")
+
+    if not leg:
+        return None
+
+    carriers = safe_get(leg, "carriers", "marketing", default=[])
+    airline = "Unknown"
+    if isinstance(carriers, list) and carriers:
+        first_carrier = carriers[0]
+        if isinstance(first_carrier, dict):
+            airline = first_carrier.get("name", "Unknown")
+
+    price = (
+        safe_get(item, "price", "formatted", default=None)
+        or safe_get(item, "price", "displayAmount", default=None)
+        or safe_get(item, "formattedPrice", default=None)
+        or "N/A"
+    )
+
+    currency = (
+        safe_get(item, "price", "currency", default=None)
+        or safe_get(item, "currency", default=None)
+        or "USD"
+    )
+
+    origin = normalize_airport_code(leg.get("origin"))
+    destination = normalize_airport_code(leg.get("destination"))
+
+    departure_time = (
+        leg.get("departure")
+        or leg.get("departureTime")
+        or leg.get("depart")
+        or "N/A"
+    )
+
+    arrival_time = (
+        leg.get("arrival")
+        or leg.get("arrivalTime")
+        or "N/A"
+    )
+
+    duration = (
+        leg.get("durationInMinutes")
+        or leg.get("durationMinutes")
+        or leg.get("duration")
+        or 0
+    )
+
+    stop_count = leg.get("stopCount")
+    if stop_count is None:
+        segments = leg.get("segments", [])
+        if isinstance(segments, list) and len(segments) > 0:
+            stop_count = max(len(segments) - 1, 0)
+        else:
+            stop_count = 0
+
+    layover_minutes = 0
+    segments = leg.get("segments", [])
+    if isinstance(segments, list) and len(segments) > 1:
+        total_segment_minutes = 0
+        for segment in segments:
+            seg_duration = (
+                segment.get("durationInMinutes")
+                or segment.get("durationMinutes")
+                or 0
+            )
+            if isinstance(seg_duration, (int, float)):
+                total_segment_minutes += seg_duration
+
+        if isinstance(duration, (int, float)):
+            layover_minutes = max(duration - total_segment_minutes, 0)
+
+    return {
+        "airline": airline,
+        "origin": origin,
+        "destination": destination,
+        "departureTime": departure_time,
+        "arrivalTime": arrival_time,
+        "price": price,
+        "currency": currency,
+        "durationMinutes": duration if isinstance(duration, (int, float)) else 0,
+        "stopCount": stop_count if isinstance(stop_count, int) else 0,
+        "layoverMinutes": layover_minutes,
+    }
+
+
+def extract_itineraries(data):
+    found = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if "legs" in obj and isinstance(obj.get("legs"), list):
+                found.append(obj)
+
+            for value in obj.values():
+                walk(value)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                walk(item)
+
+    walk(data)
+
+    unique = []
+    seen = set()
+
+    for item in found:
+        marker = str(item)
+        if marker not in seen:
+            seen.add(marker)
+            unique.append(item)
+
+    return unique
+
+
+def call_api_with_retries(url, headers, params, attempts=2, timeout=60):
+    last_error = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            print(f"Attempt {attempt}/{attempts}")
+            response = requests.get(url, headers=headers, params=params, timeout=timeout)
+            print("STATUS CODE:", response.status_code)
+            print("RAW RESPONSE:", response.text[:4000])
+            response.raise_for_status()
+            return response
+        except requests.exceptions.Timeout as e:
+            last_error = e
+            print(f"Timeout on attempt {attempt}: {e}")
+            if attempt < attempts:
+                time.sleep(2)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            print(f"Request failed on attempt {attempt}: {e}")
+            if attempt < attempts:
+                time.sleep(2)
+
+    raise last_error
+
+
+@app.route("/", methods=["GET"])
 def home():
-    return "Flight Cost Finder Backend Running"
+    return jsonify({
+        "status": "Backend is running",
+        "endpoints": [
+            "/health",
+            "/flights?from=NYC&to=LAX&date=2026-06-15"
+        ]
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "api_key_configured": bool(SKYSCANNER_API_KEY),
+        "api_host": SKYSCANNER_API_HOST,
+    })
+
 
 @app.route("/flights", methods=["GET"])
 def get_flights():
-    from_city = request.args.get("from", "").strip()
-    to_city = request.args.get("to", "").strip()
-    travel_date = request.args.get("date", "").strip()
-    max_price = request.args.get("max_price", "").strip()
-    max_stops = request.args.get("max_stops", "").strip()
-    max_layover = request.args.get("max_layover", "").strip()
+    source = request.args.get("from", "").strip().upper()
+    destination = request.args.get("to", "").strip().upper()
+    date = request.args.get("date", "").strip()
 
-    results = flights
+    city_to_airport = {
+        "NYC": "JFK",
+        "NEW YORK": "JFK",
+        "LAX": "LAX",
+        "LOS ANGELES": "LAX",
+        "CHI": "ORD",
+        "CHICAGO": "ORD",
+        "SFO": "SFO",
+        "SAN FRANCISCO": "SFO",
+    }
 
-    if from_city:
-        results = [f for f in results if f["from_city"].lower() == from_city.lower()]
+    source = city_to_airport.get(source, source)
+    destination = city_to_airport.get(destination, destination)
 
-    if to_city:
-        results = [f for f in results if f["to_city"].lower() == to_city.lower()]
+    if not source or not destination or not date:
+        return jsonify({
+            "error": "Missing required query parameters: from, to, date",
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+            "message": "Missing search parameters. Showing fallback mock data."
+        }), 400
 
-    if travel_date:
-        results = [f for f in results if f["date"] == travel_date]
+    if not SKYSCANNER_API_KEY:
+        return jsonify({
+            "message": "API key missing in .env. Showing fallback mock data.",
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+        }), 200
 
-    if max_price:
-        results = [f for f in results if f["price"] <= int(max_price)]
+    url = f"https://{SKYSCANNER_API_HOST}/web/flights/search-one-way"
 
-    if max_stops:
-        results = [f for f in results if f["stops"] <= int(max_stops)]
+    querystring = {
+        "placeIdFrom": source,
+        "placeIdTo": destination,
+        "departDate": date,
+        "adults": "1",
+        "cabinClass": "economy",
+        "currency": "USD",
+        "market": "US",
+        "locale": "en-US",
+    }
 
-    if max_layover:
-        results = [f for f in results if f["layover"] <= int(max_layover)]
+    headers = {
+        "x-rapidapi-key": SKYSCANNER_API_KEY,
+        "x-rapidapi-host": SKYSCANNER_API_HOST,
+    }
 
-    return jsonify(results)
+    try:
+        print("API HOST:", SKYSCANNER_API_HOST)
+        print("REQUEST URL:", url)
+        print("QUERYSTRING:", querystring)
+
+        response = call_api_with_retries(
+            url=url,
+            headers=headers,
+            params=querystring,
+            attempts=2,
+            timeout=60
+        )
+
+        data = response.json()
+        itineraries = extract_itineraries(data)
+
+        flights = []
+        for item in itineraries:
+            parsed = parse_itinerary(item)
+            if parsed:
+                flights.append(parsed)
+
+        if not flights:
+            return jsonify({
+                "message": "Live API responded, but no parsable flights were found. Showing fallback mock data.",
+                "fallback_used": True,
+                "fallback": MOCK_FLIGHTS,
+                "raw_itinerary_count": len(itineraries),
+                "debug_preview": data,
+            }), 200
+
+        return jsonify({
+            "message": "Live flight results fetched successfully.",
+            "fallback_used": False,
+            "flights": flights,
+        }), 200
+
+    except requests.exceptions.Timeout as e:
+        print("FINAL TIMEOUT ERROR:", e)
+        return jsonify({
+            "message": "Flight API timed out. Showing fallback mock data.",
+            "error": str(e),
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+        }), 200
+
+    except requests.exceptions.HTTPError as e:
+        print("HTTP ERROR:", e)
+        return jsonify({
+            "message": "Live API HTTP request failed. Showing fallback mock data.",
+            "error": str(e),
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+        }), 200
+
+    except requests.exceptions.RequestException as e:
+        print("REQUEST ERROR:", e)
+        return jsonify({
+            "message": "Network/API request failed. Showing fallback mock data.",
+            "error": str(e),
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+        }), 200
+
+    except Exception as e:
+        print("UNEXPECTED ERROR:", e)
+        return jsonify({
+            "message": "Unexpected error while fetching live flights. Showing fallback mock data.",
+            "error": str(e),
+            "fallback_used": True,
+            "fallback": MOCK_FLIGHTS,
+        }), 200
+
 
 if __name__ == "__main__":
-   app.run(debug=True, port=5001)
+    app.run(debug=True, host="0.0.0.0", port=5001)
